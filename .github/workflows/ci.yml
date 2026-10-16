@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch makes the in-flight run obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Fast feedback: no services needed, so this fails in seconds rather than
+  # after waiting for Postgres to come up.
+  static:
+    name: Lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run lint
+      - run: npm run test:unit
+
+  integration:
+    name: Integration and chaos tests
+    runs-on: ubuntu-latest
+    needs: static
+
+    # Real Postgres and Redis, not mocks. The claim protocol depends on
+    # FOR UPDATE SKIP LOCKED and partial-index behaviour that no in-memory
+    # substitute reproduces, so testing against a fake would prove nothing.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: relay
+          POSTGRES_PASSWORD: relay
+          POSTGRES_DB: relay
+        ports: ['5442:5432']
+        options: >-
+          --health-cmd "pg_isready -U relay -d relay"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6389:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      NODE_ENV: development
+      LOG_PRETTY: 'false'
+      LOG_LEVEL: error
+      DATABASE_URL: postgresql://relay:relay@localhost:5442/relay?schema=public
+      REDIS_URL: redis://localhost:6389
+      JWT_SECRET: ci-only-secret-value-at-least-32-chars-long
+      SECRET_ENCRYPTION_KEY: '0000000000000000000000000000000000000000000000000000000000000000'
+      # The mock receiver runs on loopback, which the SSRF guard blocks by
+      # design. The live SSRF test overrides this back to false for itself.
+      ALLOW_PRIVATE_DELIVERY_TARGETS: 'true'
+      RECEIVER_URL: http://localhost:4210
+      RELAY_URL: http://localhost:3210
+      PORT: '3210'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+
+      - name: Start the mock receiver
+        run: |
+          PORT=4210 node mock-receiver/index.js &
+          for _ in $(seq 1 40); do
+            curl -sf localhost:4210/received >/dev/null && exit 0
+            sleep 0.25
+          done
+          echo "mock receiver failed to start" && exit 1
+
+      - name: Start the API
+        run: |
+          node src/server.js &
+          for _ in $(seq 1 40); do
+            curl -sf localhost:3210/health >/dev/null && exit 0
+            sleep 0.25
+          done
+          echo "api failed to start" && exit 1
+
+      # The chaos tests spawn and kill their own workers, so no long-running
+      # worker is started here — one would compete for the same queue.
+      - run: npm run test:integration
+      - run: npm run test:chaos
+
+  image:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the runtime image
+        run: docker build --target runtime -t relay:ci .
+      - name: Assert the test fixture is absent from the runtime image
+        # Regression guard: mock-receiver/ was once copied into the runtime
+        # image. It is an unauthenticated server with a /reset endpoint and has
+        # no business in a production artifact.
+        run: |
+          if docker run --rm --entrypoint sh relay:ci -c '[ -e mock-receiver ]'; then
+            echo "mock-receiver/ leaked into the runtime image" && exit 1
+          fi
+          echo "runtime image is clean"

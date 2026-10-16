@@ -1,0 +1,54 @@
+{
+  "name": "relay",
+  "version": "0.1.0",
+  "description": "Multi-tenant webhook delivery service with at-least-once semantics",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:api": "node --watch src/server.js",
+    "dev:worker": "node --watch src/worker.js",
+    "start:api": "node src/server.js",
+    "start:worker": "node src/worker.js",
+    "migrate": "prisma migrate deploy",
+    "migrate:dev": "prisma migrate dev",
+    "generate": "prisma generate",
+    "seed": "node scripts/seed.js",
+    "test": "vitest run test/unit",
+    "test:watch": "vitest",
+    "lint": "eslint src scripts test mock-receiver",
+    "test:chaos": "node test/chaos/drain.js && node test/chaos/crash-recovery.js && node test/chaos/concurrent-workers.js",
+    "test:drain": "node test/chaos/drain.js",
+    "test:crash": "node test/chaos/crash-recovery.js",
+    "test:concurrency": "node test/chaos/concurrent-workers.js",
+    "test:states": "node test/integration/terminal-states.js",
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:chaos",
+    "test:unit": "vitest run test/unit",
+    "test:ssrf": "node test/integration/ssrf-live.js",
+    "test:circuit": "node test/integration/circuit-breaker.js",
+    "test:integration": "node test/integration/terminal-states.js && node test/integration/ssrf-live.js && node test/integration/circuit-breaker.js && node test/integration/rate-limit.js && node test/integration/tenant-isolation.js",
+    "test:isolation": "node test/integration/tenant-isolation.js",
+    "test:ratelimit": "node test/integration/rate-limit.js",
+    "lint:fix": "eslint src scripts test mock-receiver --fix"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "argon2": "^0.41.1",
+    "bullmq": "^5.34.0",
+    "express": "^5.0.1",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
+    "undici": "^7.2.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.17.0",
+    "pino-pretty": "^13.0.0",
+    "prisma": "^6.1.0",
+    "vitest": "^2.1.8"
+  }
+}

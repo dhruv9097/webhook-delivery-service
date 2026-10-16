@@ -1,0 +1,120 @@
+# Local topology. Deliberately production-shaped: api and worker are separate
+# process types off one image (12-factor), so deploying later means changing
+# where this runs, not how it is built.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: relay
+      POSTGRES_PASSWORD: relay
+      POSTGRES_DB: relay
+    ports:
+      # Host port deliberately off the default: this machine already runs other
+      # projects' Postgres and Redis. Container-internal ports stay standard, so
+      # only host-side tooling uses these.
+      - "5442:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # appendonly buys durability for the BullMQ hot path, but Redis is still
+    # only a cache of work here — Postgres remains the source of truth and the
+    # reconciler repairs any drift.
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6389:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      target: runtime
+    command: ["npx", "prisma", "migrate", "deploy"]
+    environment:
+      DATABASE_URL: postgresql://relay:relay@postgres:5432/relay?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      target: runtime
+    command: ["node", "src/server.js"]
+    env_file: .env
+    environment:
+      # These override env_file. This is a development stack, so NODE_ENV says
+      # so — that keeps ALLOW_PRIVATE_DELIVERY_TARGETS legal for the mock
+      # receiver on a private Docker IP. Log format is a separate switch,
+      # because the image is built without pino-pretty.
+      NODE_ENV: development
+      LOG_PRETTY: "false"
+      DATABASE_URL: postgresql://relay:relay@postgres:5432/relay?schema=public
+      REDIS_URL: redis://redis:6379
+      PORT: "3000"
+    ports:
+      - "3210:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Compose sends SIGTERM then waits this long before SIGKILL. Must exceed
+    # SHUTDOWN_GRACE_SECONDS or graceful drain gets cut off and we drop requests.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      target: runtime
+    command: ["node", "src/worker.js"]
+    env_file: .env
+    environment:
+      NODE_ENV: development
+      LOG_PRETTY: "false"
+      DATABASE_URL: postgresql://relay:relay@postgres:5432/relay?schema=public
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 30s
+
+  mock-receiver:
+    # Explicit test-only target, so the production image never contains it.
+    build:
+      context: .
+      target: mock-receiver
+    environment:
+      PORT: "4000"
+    ports:
+      - "4210:4000"
+
+volumes:
+  pgdata:
+  redisdata:
